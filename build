@@ -2,5 +2,5 @@
 cc main.c -o display_manager \
     -Wall -Wextra \
     -I./include -L./lib \
-    -l:libraylib_new.a -lm -ldrm -lgbm -lEGL -lGLESv2 -pthread \
+    -l:libraylib_new.a -lm -ldrm -lgbm -lEGL -lGLESv2 -lpam -pthread \
     -ggdb

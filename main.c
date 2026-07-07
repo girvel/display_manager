@@ -2,7 +2,9 @@
 #include <raylib.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <security/pam_appl.h>
 
 #define SIZE(X) sizeof(X)/sizeof(*X)
 
@@ -27,8 +29,44 @@ typedef enum {
     FOCUS_LEN,
 } Focus;
 
+typedef struct {
+    char *login, *password;
+} PamConversationPayload;
+
+int pam_conversation_handler(
+    int num_msg, const struct pam_message **msg,
+    struct pam_response **resp, void *appdata_ptr)
+{
+    PamConversationPayload *payload = appdata_ptr;
+
+    for (int i = 0; i < num_msg; i++) {
+        switch (msg[i]->msg_style) {
+        case PAM_PROMPT_ECHO_OFF:
+            resp[i] = malloc(sizeof(struct pam_response));
+            resp[i]->resp = strdup(payload->password);
+            resp[i]->resp_retcode = 0;
+            break;
+        case PAM_PROMPT_ECHO_ON:
+            resp[i] = malloc(sizeof(struct pam_response));
+            resp[i]->resp = strdup(payload->login);
+            resp[i]->resp_retcode = 0;
+            break;
+        case PAM_TEXT_INFO:
+            printf("PAM message: %s\n", msg[i]->msg);
+            break;
+        case PAM_ERROR_MSG:
+            printf("PAM error: %s\n", msg[i]->msg);
+            break;
+        }
+    }
+
+    return PAM_SUCCESS;
+}
+
 int main(void)
 {
+    int result = 0;
+
     InitWindow(SCREEN_W, SCREEN_H, "Display Manager");
     const int font_size = 32;
     Font jbmono = LoadFontEx("assets/jbmono.ttf", font_size * 2, 0, 0);
@@ -77,12 +115,41 @@ int main(void)
             switch (focus) {
             case FOCUS_LOGIN:
                 focus_delta = 1;
-            case FOCUS_PASSWORD:
-                goto exit;
+            case FOCUS_PASSWORD: {
+                #define EXPECT_OK(EXPR) do { \
+                        int status_code = (EXPR); \
+                        if (status_code != PAM_SUCCESS) { \
+                            printf(#EXPR " returned code %d\n", status_code); \
+                            goto exit; \
+                        } \
+                    } while (0)
+
+                PamConversationPayload *payload = malloc(sizeof(PamConversationPayload));
+                payload->login = login;
+                payload->password = password;
+
+                struct pam_conv conv;
+                conv.conv = pam_conversation_handler;
+                conv.appdata_ptr = payload;
+
+                pam_handle_t *pam_handle;
+                EXPECT_OK(pam_start("login", login, &conv, &pam_handle));
+                EXPECT_OK(pam_authenticate(pam_handle, 0));
+                EXPECT_OK(pam_acct_mgmt(pam_handle, 0));
+                EXPECT_OK(pam_setcred(pam_handle, 0));
+                EXPECT_OK(pam_open_session(pam_handle, 0));
+
+                char **envlist = pam_getenvlist(pam_handle);
+                for (size_t i = 0; envlist[i] != NULL; i++) {
+                    printf("env: %s\n", envlist[i]);
+                }
+
+                // TODO PAM cleanup
+            } goto exit;
             case FOCUS_LEN: assert(false);
             }
         }
-        if (IsKeyPressed(KEY_TAB)) focus_delta = 1;
+        if (IsKeyPressed(KEY_TAB)) focus_delta = 1;  // TODO does not work, investigate
         if (IsKeyPressed(KEY_DOWN)) focus_delta = 1;
         if (IsKeyPressed(KEY_UP)) focus_delta = -1;
 
@@ -92,7 +159,7 @@ int main(void)
 
         int key;
         while ((key = GetKeyPressed())) {
-            if (key >= 256) continue;
+            if (key >= 256 || key == '\t') continue;
 
             switch (focus) {
             case FOCUS_LOGIN:
@@ -150,5 +217,5 @@ int main(void)
     }
 exit:
     CloseWindow();
-    return 0;
+    return result;
 }
