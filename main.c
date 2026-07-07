@@ -7,25 +7,37 @@
 int main(void)
 {
     InitWindow(SCREEN_W, SCREEN_H, "Display Manager");
-    const int font_size = 48;
-    Font jbmono = LoadFontEx("assets/jbmono.ttf", font_size, 0, 0);
+    const int font_size = 32;
+    Font jbmono = LoadFontEx("assets/jbmono.ttf", font_size * 2, 0, 0);
+    float char_w = MeasureTextEx(jbmono, "w", font_size, 1).x;
     SetTextureFilter(jbmono.texture, TEXTURE_FILTER_BILINEAR);
+
+    const int login_box_padding = 20;
+    const int login_box_h = login_box_padding * 2 + font_size * 2;
+    const int login_box_w = login_box_padding * 2 + char_w * 32;
+    Rectangle login_box = {
+        (SCREEN_W - login_box_w) / 2., (SCREEN_H - login_box_h) / 2.,
+        login_box_w, login_box_h
+    };
 
     while (!WindowShouldClose()) {
         BeginDrawing();
             ClearBackground(BLACK);
 
+            DrawRectangleLinesEx(login_box, 2, RAYWHITE);
+
             {
                 const char *line_login = "login: girvel";
-                const int line_login_w = MeasureTextEx(jbmono, line_login, font_size, 1).x;
-                Vector2 pos = {(SCREEN_W - line_login_w) / 2., SCREEN_H / 2. - font_size};
+                Vector2 pos = {login_box.x + login_box_padding, login_box.y + login_box_padding};
                 DrawTextEx(jbmono, line_login, pos, font_size, 1, RAYWHITE);
             }
 
             {
                 const char *line_password = "password: ******";
-                const int line_password_w = MeasureTextEx(jbmono, line_password, font_size, 1).x;
-                Vector2 pos = {(SCREEN_W - line_password_w) / 2., SCREEN_H / 2.};
+                Vector2 pos = {
+                    login_box.x + login_box_padding,
+                    login_box.y + login_box_padding + font_size
+                };
                 DrawTextEx(jbmono, line_password, pos, font_size, 1, RAYWHITE);
             }
         EndDrawing();
