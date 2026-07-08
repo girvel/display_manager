@@ -5,6 +5,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <security/pam_appl.h>
+#include <sys/types.h>
+#include <grp.h>
+#include <pwd.h>
+#include <unistd.h>
 
 #define SIZE(X) sizeof(X)/sizeof(*X)
 
@@ -16,7 +20,10 @@ int mod(int a, int b) {
     return result;
 }
 
+// TODO handle all errors
 // TODO parse screen size
+// TODO blinking cursor
+// TODO do not redraw unless something changed?
 #define SCREEN_W 3440
 #define SCREEN_H 1440
 
@@ -69,16 +76,26 @@ typedef enum {
     STATUS_ERROR,
 } AuthStatus;
 
-#define EXPECT_OK(EXPR) do { \
-        int status_code = (EXPR); \
-        if (status_code != PAM_SUCCESS) { \
-            printf(#EXPR " returned code %d\n", status_code); \
-            return STATUS_ERROR; \
-        } \
-    } while (0)
+typedef struct {
+    AuthStatus status;
+    union {
+        char **envlist;
+    };
+} AuthResult;
 
-AuthStatus auth(const char *login, const char *password)
+AuthResult auth(const char *login, const char *password)
 {
+    AuthResult result;
+
+    #define EXPECT_OK(EXPR) do { \
+            int status_code = (EXPR); \
+            if (status_code != PAM_SUCCESS) { \
+                printf(#EXPR " returned code %d\n", status_code); \
+                result.status = STATUS_ERROR; \
+                return result; \
+            } \
+        } while (0)
+
     PamConversationPayload *payload = malloc(sizeof(PamConversationPayload));
     payload->login = login;
     payload->password = password;
@@ -89,33 +106,37 @@ AuthStatus auth(const char *login, const char *password)
 
     pam_handle_t *pam_handle;
     EXPECT_OK(pam_start("login", login, &conv, &pam_handle));
+    pam_set_item(pam_handle, PAM_TTY, "/dev/tty2");  // TODO hardcoded
+    pam_putenv(pam_handle, "XDG_VTNR=2");
 
     int status_code = pam_authenticate(pam_handle, 0);
     if (status_code == PAM_AUTH_ERR) {
-        return STATUS_WRONG_CREDENTIALS;
+        result.status = STATUS_WRONG_CREDENTIALS;
+        return result;
     } else if (status_code != PAM_SUCCESS) {
         printf("pam_authenticate(pam_handle, 0) returned code %d\n", status_code);
-        return STATUS_ERROR;
+        result.status = STATUS_ERROR;
+        return result;
     }
 
     EXPECT_OK(pam_acct_mgmt(pam_handle, 0));
     EXPECT_OK(pam_setcred(pam_handle, 0));
     EXPECT_OK(pam_open_session(pam_handle, 0));
 
-    char **envlist = pam_getenvlist(pam_handle);
-    for (size_t i = 0; envlist[i] != NULL; i++) {
-        printf("env: %s\n", envlist[i]);
-    }
-
     // TODO PAM cleanup
 
-    return STATUS_OK;
+    result.status = STATUS_OK;
+    result.envlist = pam_getenvlist(pam_handle);
+    for (size_t i = 0; result.envlist[i] != NULL; i++) {
+        printf("env: %s\n", result.envlist[i]);
+    }
+    return result;
+
+    #undef EXPECT_OK
 }
 
 int main(void)
 {
-    int result = 0;
-
     InitWindow(SCREEN_W, SCREEN_H, "Display Manager");
     const int font_size = 32;
     Font jbmono = LoadFontEx("assets/jbmono.ttf", font_size * 2, 0, 0);
@@ -138,6 +159,8 @@ int main(void)
     char password[16] = "";
     char password_obscured[16] = "";
     size_t password_len = 0;
+
+    char **pam_envlist;
 
     while (!WindowShouldClose()) {
         if (IsKeyPressed(KEY_BACKSPACE) || IsKeyPressedRepeat(KEY_BACKSPACE)) {
@@ -183,6 +206,7 @@ int main(void)
                 continue;
             }
             if (key >= 256) continue;
+            if ('A' <= key && key <= 'Z') key = key - 'A' + 'a';
 
             switch (focus) {
             case FOCUS_LOGIN:
@@ -210,9 +234,11 @@ int main(void)
         }
 
         if (will_auth) {
-            switch (auth(login, password)) {
+            AuthResult auth_result = auth(login, password);
+            switch (auth_result.status) {
             case STATUS_OK:
-                goto exit;
+                pam_envlist = auth_result.envlist;
+                goto login;
             case STATUS_ERROR:
                 break;
             case STATUS_WRONG_CREDENTIALS:
@@ -253,7 +279,35 @@ int main(void)
             }
         EndDrawing();
     }
-exit:
+login:
     CloseWindow();
-    return result;
+
+    struct passwd *passwd_data = getpwnam(login);
+    assert(initgroups(login, passwd_data->pw_gid) == 0);  // TODO errno & such
+    assert(setgid(passwd_data->pw_gid) == 0);
+    assert(setuid(passwd_data->pw_uid) == 0);
+    assert(chdir(passwd_data->pw_dir) == 0);
+
+    char *const argv[] = {passwd_data->pw_shell, "-l", "-c", "dbus-run-session niri", NULL};
+
+    int pam_envlist_len;
+    for (pam_envlist_len = 0; pam_envlist[pam_envlist_len] != NULL; pam_envlist_len++);
+    const int custom_vars_len = 8;
+    char **envp = malloc((pam_envlist_len + custom_vars_len + 1) * sizeof(const char *));
+    asprintf(&envp[0], "USER=%s", login);
+    asprintf(&envp[1], "LOGNAME=%s", login);
+    asprintf(&envp[2], "SHELL=%s", passwd_data->pw_shell);
+    asprintf(&envp[3], "HOME=%s", passwd_data->pw_dir);
+    envp[4] = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+    envp[5] = "XDG_SESSION_TYPE=wayland";  // TODO probably excessive
+    envp[6] = "XDG_SESSION_CLASS=user";
+    asprintf(&envp[7], "XDG_RUNTIME_DIR=/run/user/%d", passwd_data->pw_uid);
+    for (int i = 0; i < pam_envlist_len; i++) {
+        envp[custom_vars_len + i] = pam_envlist[i];
+    }
+    envp[pam_envlist_len + 5] = NULL;
+    printf("Ready to go!\n");
+    execve(argv[0], argv, envp);
+
+    return 0;
 }
