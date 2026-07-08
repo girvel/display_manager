@@ -30,7 +30,7 @@ typedef enum {
 } Focus;
 
 typedef struct {
-    char *login, *password;
+    const char *login, *password;
 } PamConversationPayload;
 
 int pam_conversation_handler(
@@ -61,6 +61,55 @@ int pam_conversation_handler(
     }
 
     return PAM_SUCCESS;
+}
+
+typedef enum {
+    STATUS_OK,
+    STATUS_WRONG_CREDENTIALS,
+    STATUS_ERROR,
+} AuthStatus;
+
+#define EXPECT_OK(EXPR) do { \
+        int status_code = (EXPR); \
+        if (status_code != PAM_SUCCESS) { \
+            printf(#EXPR " returned code %d\n", status_code); \
+            return STATUS_ERROR; \
+        } \
+    } while (0)
+
+AuthStatus auth(const char *login, const char *password)
+{
+    PamConversationPayload *payload = malloc(sizeof(PamConversationPayload));
+    payload->login = login;
+    payload->password = password;
+
+    struct pam_conv conv;
+    conv.conv = pam_conversation_handler;
+    conv.appdata_ptr = payload;
+
+    pam_handle_t *pam_handle;
+    EXPECT_OK(pam_start("login", login, &conv, &pam_handle));
+
+    int status_code = pam_authenticate(pam_handle, 0);
+    if (status_code == PAM_AUTH_ERR) {
+        return STATUS_WRONG_CREDENTIALS;
+    } else if (status_code != PAM_SUCCESS) {
+        printf("pam_authenticate(pam_handle, 0) returned code %d\n", status_code);
+        return STATUS_ERROR;
+    }
+
+    EXPECT_OK(pam_acct_mgmt(pam_handle, 0));
+    EXPECT_OK(pam_setcred(pam_handle, 0));
+    EXPECT_OK(pam_open_session(pam_handle, 0));
+
+    char **envlist = pam_getenvlist(pam_handle);
+    for (size_t i = 0; envlist[i] != NULL; i++) {
+        printf("env: %s\n", envlist[i]);
+    }
+
+    // TODO PAM cleanup
+
+    return STATUS_OK;
 }
 
 int main(void)
@@ -111,41 +160,15 @@ int main(void)
         }
 
         int focus_delta = 0;
+        bool will_auth = false;
         if (IsKeyPressed(KEY_ENTER)) {
             switch (focus) {
             case FOCUS_LOGIN:
                 focus_delta = 1;
-            case FOCUS_PASSWORD: {
-                #define EXPECT_OK(EXPR) do { \
-                        int status_code = (EXPR); \
-                        if (status_code != PAM_SUCCESS) { \
-                            printf(#EXPR " returned code %d\n", status_code); \
-                            goto exit; \
-                        } \
-                    } while (0)
-
-                PamConversationPayload *payload = malloc(sizeof(PamConversationPayload));
-                payload->login = login;
-                payload->password = password;
-
-                struct pam_conv conv;
-                conv.conv = pam_conversation_handler;
-                conv.appdata_ptr = payload;
-
-                pam_handle_t *pam_handle;
-                EXPECT_OK(pam_start("login", login, &conv, &pam_handle));
-                EXPECT_OK(pam_authenticate(pam_handle, 0));
-                EXPECT_OK(pam_acct_mgmt(pam_handle, 0));
-                EXPECT_OK(pam_setcred(pam_handle, 0));
-                EXPECT_OK(pam_open_session(pam_handle, 0));
-
-                char **envlist = pam_getenvlist(pam_handle);
-                for (size_t i = 0; envlist[i] != NULL; i++) {
-                    printf("env: %s\n", envlist[i]);
-                }
-
-                // TODO PAM cleanup
-            } goto exit;
+                break;
+            case FOCUS_PASSWORD:
+                will_auth = true;
+                break;
             case FOCUS_LEN: assert(false);
             }
         }
@@ -153,13 +176,13 @@ int main(void)
         if (IsKeyPressed(KEY_DOWN)) focus_delta = 1;
         if (IsKeyPressed(KEY_UP)) focus_delta = -1;
 
-        if (focus_delta != 0) {
-            focus = mod(focus + focus_delta, FOCUS_LEN);
-        }
-
         int key;
         while ((key = GetKeyPressed())) {
-            if (key >= 256 || key == '\t') continue;
+            if (key == '\t') {
+                focus_delta = 1;
+                continue;
+            }
+            if (key >= 256) continue;
 
             switch (focus) {
             case FOCUS_LOGIN:
@@ -179,6 +202,21 @@ int main(void)
                 }
                 break;
             case FOCUS_LEN: assert(false);
+            }
+        }
+
+        if (focus_delta != 0) {
+            focus = mod(focus + focus_delta, FOCUS_LEN);
+        }
+
+        if (will_auth) {
+            switch (auth(login, password)) {
+            case STATUS_OK:
+                goto exit;
+            case STATUS_ERROR:
+                break;
+            case STATUS_WRONG_CREDENTIALS:
+                break;
             }
         }
 
